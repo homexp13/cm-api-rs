@@ -1,4 +1,4 @@
-use sqlx::{Error, prelude::FromRow};
+﻿use sqlx::{Error, prelude::FromRow};
 use std::sync::Mutex;
 use std::{io::Cursor, net::ToSocketAddrs};
 
@@ -12,6 +12,7 @@ use rocket::{
 };
 use rocket_db_pools::Connection;
 use sqlx::query_as;
+use serde::Deserialize;
 
 use crate::admin::AuthenticatedUser;
 use crate::{Cmdb, Config, ServerConfig, admin::Staff};
@@ -53,13 +54,57 @@ pub struct GameResponse {
     data: GameStatus,
 }
 
+
+fn deserialize_i32_from_bool_or_number<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or_else(|| serde::de::Error::custom("invalid integer value")),
+        serde_json::Value::Bool(b) => Ok(if b { 1 } else { 0 }),
+        serde_json::Value::String(s) => s
+            .parse::<i32>()
+            .map_err(|_| serde::de::Error::custom("invalid numeric string")),
+        _ => Err(serde::de::Error::custom(
+            "expected number, bool, or numeric string",
+        )),
+    }
+}
+fn deserialize_i32_from_nullable_number<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(0),
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or_else(|| serde::de::Error::custom("invalid integer value")),
+        Some(serde_json::Value::Bool(b)) => Ok(if b { 1 } else { 0 }),
+        Some(serde_json::Value::String(s)) => s
+            .parse::<i32>()
+            .map_err(|_| serde::de::Error::custom("invalid numeric string")),
+        _ => Err(serde::de::Error::custom(
+            "expected null, number, bool, or numeric string",
+        )),
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(crate = "rocket::serde")]
 pub struct GameStatus {
     mode: String,
+    #[serde(deserialize_with = "deserialize_i32_from_bool_or_number")]
     vote: i32,
+    #[serde(deserialize_with = "deserialize_i32_from_bool_or_number")]
     ai: i32,
     host: Option<String>,
+    #[serde(deserialize_with = "deserialize_i32_from_nullable_number")]
     round_id: i32,
     players: i32,
     revision: String,
@@ -72,8 +117,10 @@ pub struct GameStatus {
     time_dilation_avg: f32,
     time_dilation_avg_slow: f32,
     time_dilation_avg_fast: f32,
-    mcpu: f32,
-    cpu: f32,
+    #[serde(default)]
+    mcpu: Option<f32>,
+    #[serde(default)]
+    cpu: Option<f32>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -101,12 +148,7 @@ pub fn refresh_admins(config: &Config) -> Result<(), String> {
         .ok_or_else(|| "Topic config not available".to_string())?;
 
     for server in topic_config.servers.iter().filter(|s| s.refresh_admins) {
-        let topic = serde_json::to_string(&GameRequest {
-            query: "refresh_admins".to_string(),
-            auth: Some(server.auth.clone()),
-            source: "cm-api-rs".to_string(),
-        })
-        .map_err(|e| format!("Failed to serialize request: {e}"))?;
+        let topic = format!("refresh_admins&key={}", server.auth);
 
         let addr = server
             .host
@@ -115,7 +157,7 @@ pub fn refresh_admins(config: &Config) -> Result<(), String> {
             .next()
             .ok_or_else(|| format!("No socket address found for {}", server.name))?;
 
-        if let Err(e) = http2byond::send_byond(&addr, &topic) {
+        if let Err(e) = http2byond::send_byond(&addr, &format!("?{topic}")) {
             eprintln!("Failed to send refresh_admins to {}: {e}", server.name);
         }
     }
@@ -183,23 +225,7 @@ fn query_server(server: ServerConfig) -> ServerStatusResponse {
     let recommended_byond_version = server.recommended_byond_version.clone();
     let tags = server.tags.clone();
 
-    let topic = match serde_json::to_string(&GameRequest {
-        query: "status".to_string(),
-        auth: Some(server.auth.clone()),
-        source: "cm-api-rs".to_string(),
-    }) {
-        Ok(t) => t,
-        Err(_) => {
-            return ServerStatusResponse {
-                name: server.name,
-                url,
-                status: "unavailable".to_string(),
-                details: None,
-                recommended_byond_version,
-                tags,
-            };
-        }
-    };
+    let topic = format!("status&format=json&key={}", server.auth);
 
     let addr = match server.host.to_socket_addrs() {
         Ok(mut addrs) => match addrs.next() {
@@ -227,9 +253,10 @@ fn query_server(server: ServerConfig) -> ServerStatusResponse {
         }
     };
 
-    let byond = match http2byond::send_byond(&addr, &topic) {
+    let byond = match http2byond::send_byond(&addr, &format!("?{topic}")) {
         Ok(b) => b,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("send_byond failed for {} ({}): {}", server.name, url, e);
             return ServerStatusResponse {
                 name: server.name,
                 url,
@@ -241,9 +268,21 @@ fn query_server(server: ServerConfig) -> ServerStatusResponse {
         }
     };
 
-    let mut byond_string = match byond {
+    let byond_string = match byond {
         ByondTopicValue::String(s) => s,
-        _ => {
+        ByondTopicValue::Number(n) => {
+            eprintln!("BYOND returned Number for {} ({}): {}", server.name, url, n);
+            return ServerStatusResponse {
+                name: server.name,
+                url,
+                status: "unavailable".to_string(),
+                details: None,
+                recommended_byond_version,
+                tags,
+            };
+        }
+        ByondTopicValue::None => {
+            eprintln!("BYOND returned None for {} ({})", server.name, url);
             return ServerStatusResponse {
                 name: server.name,
                 url,
@@ -255,9 +294,9 @@ fn query_server(server: ServerConfig) -> ServerStatusResponse {
         }
     };
 
-    byond_string.pop();
+    let byond_string = byond_string.trim_end_matches('\0');
 
-    match serde_json::from_str::<GameResponse>(&byond_string) {
+    match serde_json::from_str::<GameResponse>(byond_string) {
         Ok(game_response) => ServerStatusResponse {
             name: server.name,
             url,
@@ -266,13 +305,31 @@ fn query_server(server: ServerConfig) -> ServerStatusResponse {
             recommended_byond_version,
             tags,
         },
-        Err(_) => ServerStatusResponse {
-            name: server.name,
-            url,
-            status: "unavailable".to_string(),
-            details: None,
-            recommended_byond_version,
-            tags,
+        Err(_) => match serde_json::from_str::<GameStatus>(byond_string) {
+            Ok(game_status) => ServerStatusResponse {
+                name: server.name,
+                url,
+                status: "available".to_string(),
+                details: Some(GameResponse {
+                    statuscode: 200,
+                    response: "ok".to_string(),
+                    data: game_status,
+                }),
+                recommended_byond_version,
+                tags,
+            },
+            Err(e) => {
+                eprintln!("Failed to parse BYOND JSON for {} ({}): {}", server.name, url, e);
+                eprintln!("Raw BYOND response: {}", byond_string);
+                ServerStatusResponse {
+                    name: server.name,
+                    url,
+                    status: "unavailable".to_string(),
+                    details: None,
+                    recommended_byond_version,
+                    tags,
+                }
+            }
         },
     }
 }
@@ -314,3 +371,9 @@ pub async fn byond_hash(config: &State<Config>, byond_ver: &str) -> PublicCors<B
 
     PublicCors(ByondHashResponse { sha256 })
 }
+
+
+
+
+
+

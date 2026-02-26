@@ -4,12 +4,12 @@ use rocket_db_pools::Connection;
 use serde::Serialize;
 
 use crate::{
-    Cmapi, Config,
+    Cmdb, Config,
     authentik::{AuthentikConfig, AuthentikError, get_user_by_attribute},
     player::AuthorizationHeader,
 };
 
-const TOKEN_LIFETIME_HOURS: i64 = 24;
+const TOKEN_LIFETIME_HOURS: i64 = 3;
 
 /// Generates a secure 64-character hex token (32 random bytes)
 fn generate_secure_token() -> String {
@@ -19,7 +19,13 @@ fn generate_secure_token() -> String {
 }
 
 /// Creates a new token for a steam_id and stores it in the database
-pub async fn create_token(db: &mut Connection<Cmapi>, steam_id: &str) -> Result<String, String> {
+pub async fn create_token(
+    db: &mut Connection<Cmdb>,
+    steam_id: &str,
+    display_name: &str,
+    ip: Option<&str>,
+    cid: Option<&str>,
+) -> Result<String, String> {
     let token = generate_secure_token();
     let expires_at = chrono::Utc::now()
         .checked_add_signed(chrono::Duration::hours(TOKEN_LIFETIME_HOURS))
@@ -27,12 +33,15 @@ pub async fn create_token(db: &mut Connection<Cmapi>, steam_id: &str) -> Result<
 
     sqlx::query(
         r#"
-        INSERT INTO steam_tokens (token, steam_id, expires_at)
-        VALUES (?, ?, ?)
+        INSERT INTO steam_tokens (token, steam_id, display_name, ip, cid, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&token)
     .bind(steam_id)
+    .bind(display_name)
+    .bind(ip)
+    .bind(cid)
     .bind(expires_at)
     .execute(&mut ***db)
     .await
@@ -42,7 +51,7 @@ pub async fn create_token(db: &mut Connection<Cmapi>, steam_id: &str) -> Result<
 }
 
 /// Validates a token and returns the associated steam_id if valid and not expired
-pub async fn validate_token(db: &mut Connection<Cmapi>, token: &str) -> Result<String, String> {
+pub async fn validate_token(db: &mut Connection<Cmdb>, token: &str) -> Result<String, String> {
     let row: Option<(String,)> = sqlx::query_as(
         r#"
         SELECT steam_id
@@ -77,7 +86,7 @@ pub struct TokenUserInfoResponse {
 #[get("/TokenUserInfo")]
 pub async fn get_token_user_info(
     auth_header: AuthorizationHeader,
-    mut db: Connection<Cmapi>,
+    mut db: Connection<Cmdb>,
     config: &State<Config>,
 ) -> Result<Json<TokenUserInfoResponse>, (Status, Json<AuthentikError>)> {
     let authentik_config: &AuthentikConfig = config.authentik.as_ref().ok_or_else(|| {

@@ -150,10 +150,6 @@ struct Config {
 #[database("cmdb")]
 pub struct Cmdb(MySqlPool);
 
-#[derive(Database)]
-#[database("cmapi")]
-pub struct Cmapi(MySqlPool);
-
 #[launch]
 async fn rocket() -> _ {
     let figment = Figment::from(rocket::Config::default())
@@ -209,7 +205,6 @@ async fn rocket() -> _ {
     let mut rocket_builder = rocket::custom(figment)
         .manage(byond::ByondTopic::default())
         .attach(Cmdb::init())
-        .attach(Cmapi::init())
         .attach(AdHoc::config::<Config>())
         .attach(Cors::new(allowed_origin));
 

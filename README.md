@@ -24,7 +24,7 @@ base_url = "/api" # base path for API routes (default: "/api")
 
 ```toml
 [topic]
-host = "play.cm-ss13.com:1400" # game server address for status pings
+host = "play.tgmc.example.com:1400" # game server address for status pings
 auth = "your-comms-key"        # comms key to contact the game server
 ```
 
@@ -114,5 +114,5 @@ address = "0.0.0.0" # address to bind the web server (e.g., "0.0.0.0" for contai
 port = 8080         # port to listen on
 
 [default.databases.cmdb]
-url = "mysql://root:password@127.0.0.1:3306/cmdb" # MySQL connection string
+url = "mysql://root:password@127.0.0.1:3306/tgmc_db" # MySQL connection string
 ```

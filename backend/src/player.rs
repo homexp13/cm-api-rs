@@ -367,7 +367,7 @@ pub async fn create_note(
     .bind(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string())
     .bind(0)
     .bind(if confidential {1} else {0})
-    .bind("[cmdb]".to_string())
+    .bind("[tgmc-db]".to_string())
     .bind(category)
     .execute(db).await {
         Ok(query) => query.rows_affected() > 0,

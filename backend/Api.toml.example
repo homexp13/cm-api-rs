@@ -1,0 +1,18 @@
+[host]
+base_url = "/api"
+
+[steam]
+web_api_key = "replace-with-steam-web-api-key"
+
+# instance -> app id mapping used by /api/Steam/Authenticate
+[steam.app_id]
+steam = 480
+
+# Optional: server status polling used by launcher server list.
+# Remove if not needed in local tests.
+[topic]
+servers = [
+  { name = "Local TGMC", host = "127.0.0.1:14999", auth = "it_should_not_used_on_tgmc", refresh_admins = false, recommended_byond_version = "516.1659", tags = ["pvp"] }
+]
+
+

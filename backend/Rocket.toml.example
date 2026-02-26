@@ -1,0 +1,6 @@
+[default]
+address = "127.0.0.1"
+port = 8000
+
+[default.databases.cmdb]
+url = "mysql://root:@127.0.0.1:3306/feedback"

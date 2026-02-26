@@ -1,20 +1,28 @@
 use std::collections::HashMap;
 
 use rocket::{State, http::Status, serde::json::Json};
+use rocket::request::{FromRequest, Outcome};
 use rocket_db_pools::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    Cmapi, Config,
-    authentik::{AuthentikError, create_user_with_steam_id, get_user_by_attribute},
-    token::create_token,
-};
+use crate::{Cmdb, Config, token::create_token};
 
+#[derive(Debug)]
+pub struct ClientIp(pub Option<String>);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for ClientIp {
+    type Error = ();
+
+    async fn from_request(req: &'r rocket::Request<'_>) -> Outcome<Self, Self::Error> {
+        let ip = req.client_ip().map(|ip| ip.to_string());
+        Outcome::Success(ClientIp(ip))
+    }
+}
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SteamConfig {
     pub web_api_key: String,
     pub app_id: HashMap<String, u32>,
-    pub linking_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,9 +42,14 @@ pub struct SteamAuthResponse {
     pub success: bool,
     pub user_exists: bool,
     pub access_token: Option<String>,
-    pub requires_linking: bool,
-    pub linking_url: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(crate = "rocket::serde")]
+pub struct SteamErrorResponse {
+    pub error: String,
+    pub message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,25 +159,16 @@ async fn validate_steam_ticket(
 #[post("/Authenticate", format = "json", data = "<request>")]
 pub async fn authenticate(
     config: &State<Config>,
-    mut db: Connection<Cmapi>,
+    mut cmdb: Connection<Cmdb>,
+    client_ip: ClientIp,
     request: Json<SteamAuthRequest>,
-) -> Result<Json<SteamAuthResponse>, (Status, Json<AuthentikError>)> {
+) -> Result<Json<SteamAuthResponse>, (Status, Json<SteamErrorResponse>)> {
     let steam_config = config.steam.as_ref().ok_or_else(|| {
         (
             Status::InternalServerError,
-            Json(AuthentikError {
+            Json(SteamErrorResponse {
                 error: "not_configured".to_string(),
                 message: "Steam authentication is not configured".to_string(),
-            }),
-        )
-    })?;
-
-    let authentik_config = config.authentik.as_ref().ok_or_else(|| {
-        (
-            Status::InternalServerError,
-            Json(AuthentikError {
-                error: "not_configured".to_string(),
-                message: "Authentik is not configured".to_string(),
             }),
         )
     })?;
@@ -183,99 +187,36 @@ pub async fn authenticate(
     .map_err(|e| {
         (
             Status::Unauthorized,
-            Json(AuthentikError {
+            Json(SteamErrorResponse {
                 error: "ticket_validation_failed".to_string(),
                 message: e,
             }),
         )
     })?;
-
-    // Look up user by steam_id attribute in Authentik
-    let user_result = get_user_by_attribute(
-        &http_client,
-        authentik_config,
-        "steam_id",
+    let client_ip = client_ip.0.as_deref();
+    let token = create_token(
+        &mut cmdb,
         &request.steam_id,
+        &request.display_name,
+        client_ip,
+        None,
     )
-    .await;
+        .await
+        .map_err(|e| {
+            (
+                Status::InternalServerError,
+                Json(SteamErrorResponse {
+                    error: "token_generation_failed".to_string(),
+                    message: e,
+                }),
+            )
+        })?;
 
-    match user_result {
-        Ok(_user) => {
-            // User exists, generate access token using cm-api database
-            let token = create_token(&mut db, &request.steam_id)
-                .await
-                .map_err(|e| {
-                    (
-                        Status::InternalServerError,
-                        Json(AuthentikError {
-                            error: "token_generation_failed".to_string(),
-                            message: e,
-                        }),
-                    )
-                })?;
-
-            Ok(Json(SteamAuthResponse {
-                success: true,
-                user_exists: true,
-                access_token: Some(token),
-                requires_linking: false,
-                linking_url: None,
-                error: None,
-            }))
-        }
-        Err(_) => {
-            // User not found
-            if request.create_account_if_missing {
-                // Create new user with Steam persona name as username
-                let _user = create_user_with_steam_id(
-                    &http_client,
-                    authentik_config,
-                    &request.display_name,
-                    &request.steam_id,
-                )
-                .await
-                .map_err(|e| {
-                    (
-                        Status::InternalServerError,
-                        Json(AuthentikError {
-                            error: "user_creation_failed".to_string(),
-                            message: e,
-                        }),
-                    )
-                })?;
-
-                // Generate token for new user using cm-api database
-                let token = create_token(&mut db, &request.steam_id)
-                    .await
-                    .map_err(|e| {
-                        (
-                            Status::InternalServerError,
-                            Json(AuthentikError {
-                                error: "token_generation_failed".to_string(),
-                                message: e,
-                            }),
-                        )
-                    })?;
-
-                Ok(Json(SteamAuthResponse {
-                    success: true,
-                    user_exists: true,
-                    access_token: Some(token),
-                    requires_linking: false,
-                    linking_url: None,
-                    error: None,
-                }))
-            } else {
-                // User needs to link or create account
-                Ok(Json(SteamAuthResponse {
-                    success: false,
-                    user_exists: false,
-                    access_token: None,
-                    requires_linking: true,
-                    linking_url: Some(steam_config.linking_url.clone()),
-                    error: None,
-                }))
-            }
-        }
-    }
+    Ok(Json(SteamAuthResponse {
+        success: true,
+        user_exists: true,
+        access_token: Some(token),
+        error: None,
+    }))
 }
+

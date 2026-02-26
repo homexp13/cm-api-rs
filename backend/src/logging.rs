@@ -39,6 +39,8 @@ pub async fn log_external(
     message: String,
     use_user_manager_channel: bool,
 ) -> Result<(), Box<dyn Error>> {
+    let public_url = option_env!("CM_API_PUBLIC_URL").unwrap_or("https://example.tgmc");
+
     let logging_config = match &config.logging {
         Some(logging) => logging,
         None => return Err(Box::new(LogError {})),
@@ -59,11 +61,11 @@ pub async fn log_external(
             description: message,
             color: 8359053,
             author: ExternalLogAuthor {
-                name: "[cmdb]".to_string(),
-                url: "https://db.cm-ss13.com".to_string(),
+                name: "[tgmc-db]".to_string(),
+                url: public_url.to_string(),
             },
         }],
-        username: "[cmdb]".to_string(),
+        username: "[tgmc-db]".to_string(),
     };
 
     match reqwest::Client::new()
